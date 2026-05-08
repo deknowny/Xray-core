@@ -370,6 +370,52 @@ func writeBufferMetrics(w io.Writer) {
 	fmt.Fprintln(w, "# HELP xray_buf_bytespool_owned_max_bytes_in_use High-water mark for bytespool-backed buf.Buffer capacity.")
 	fmt.Fprintln(w, "# TYPE xray_buf_bytespool_owned_max_bytes_in_use gauge")
 	fmt.Fprintf(w, "xray_buf_bytespool_owned_max_bytes_in_use %d\n", snapshot.BytespoolOwnedMaxBytesInUse)
+
+	fmt.Fprintln(w, "# HELP xray_buf_copy_active Active buf.Copy loops.")
+	fmt.Fprintln(w, "# TYPE xray_buf_copy_active gauge")
+	fmt.Fprintf(w, "xray_buf_copy_active %d\n", snapshot.CopyActive)
+
+	fmt.Fprintln(w, "# HELP xray_buf_copy_started_total buf.Copy loops started.")
+	fmt.Fprintln(w, "# TYPE xray_buf_copy_started_total counter")
+	fmt.Fprintf(w, "xray_buf_copy_started_total %d\n", snapshot.CopyStartedTotal)
+
+	fmt.Fprintln(w, "# HELP xray_buf_copy_completed_total buf.Copy loops completed.")
+	fmt.Fprintln(w, "# TYPE xray_buf_copy_completed_total counter")
+	fmt.Fprintf(w, "xray_buf_copy_completed_total %d\n", snapshot.CopyCompletedTotal)
+
+	fmt.Fprintln(w, "# HELP xray_buf_copy_read_errors_total buf.Copy loops completed with read-side errors.")
+	fmt.Fprintln(w, "# TYPE xray_buf_copy_read_errors_total counter")
+	fmt.Fprintf(w, "xray_buf_copy_read_errors_total %d\n", snapshot.CopyReadErrorTotal)
+
+	fmt.Fprintln(w, "# HELP xray_buf_copy_write_errors_total buf.Copy loops completed with write-side errors.")
+	fmt.Fprintln(w, "# TYPE xray_buf_copy_write_errors_total counter")
+	fmt.Fprintf(w, "xray_buf_copy_write_errors_total %d\n", snapshot.CopyWriteErrorTotal)
+
+	fmt.Fprintln(w, "# HELP xray_buf_copy_read_batches_total MultiBuffer batches read by buf.Copy.")
+	fmt.Fprintln(w, "# TYPE xray_buf_copy_read_batches_total counter")
+	fmt.Fprintf(w, "xray_buf_copy_read_batches_total %d\n", snapshot.CopyReadBatchesTotal)
+
+	fmt.Fprintln(w, "# HELP xray_buf_copy_write_batches_total MultiBuffer batches written by buf.Copy.")
+	fmt.Fprintln(w, "# TYPE xray_buf_copy_write_batches_total counter")
+	fmt.Fprintf(w, "xray_buf_copy_write_batches_total %d\n", snapshot.CopyWriteBatchesTotal)
+
+	fmt.Fprintln(w, "# HELP xray_buf_copy_read_bytes_total Bytes read by buf.Copy.")
+	fmt.Fprintln(w, "# TYPE xray_buf_copy_read_bytes_total counter")
+	fmt.Fprintf(w, "xray_buf_copy_read_bytes_total %d\n", snapshot.CopyReadBytesTotal)
+
+	fmt.Fprintln(w, "# HELP xray_buf_copy_write_bytes_total Bytes written by buf.Copy.")
+	fmt.Fprintln(w, "# TYPE xray_buf_copy_write_bytes_total counter")
+	fmt.Fprintf(w, "xray_buf_copy_write_bytes_total %d\n", snapshot.CopyWriteBytesTotal)
+
+	fmt.Fprintln(w, "# HELP xray_buf_copy_max_batch_bytes Largest MultiBuffer batch observed in buf.Copy.")
+	fmt.Fprintln(w, "# TYPE xray_buf_copy_max_batch_bytes gauge")
+	fmt.Fprintf(w, "xray_buf_copy_max_batch_bytes %d\n", snapshot.CopyMaxBatchBytes)
+
+	fmt.Fprintln(w, "# HELP xray_buf_copy_batch_bytes_observed_total Cumulative observed buf.Copy read batch size.")
+	fmt.Fprintln(w, "# TYPE xray_buf_copy_batch_bytes_observed_total counter")
+	for _, bucket := range snapshot.CopyBatchBytesBuckets {
+		fmt.Fprintf(w, "xray_buf_copy_batch_bytes_observed_total{le=%s} %d\n", quoteLabel(bucket.Le), bucket.Value)
+	}
 }
 
 func writeBytespoolMetrics(w io.Writer) {

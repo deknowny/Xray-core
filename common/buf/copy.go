@@ -92,6 +92,8 @@ func copyInternal(reader Reader, writer Writer, handler *copyHandler) error {
 	for {
 		buffer, err := reader.ReadMultiBuffer()
 		if !buffer.IsEmpty() {
+			batchBytes := int64(buffer.Len())
+			recordCopyReadBatch(batchBytes)
 			for _, handler := range handler.onData {
 				handler(buffer)
 			}
@@ -99,6 +101,7 @@ func copyInternal(reader Reader, writer Writer, handler *copyHandler) error {
 			if werr := writer.WriteMultiBuffer(buffer); werr != nil {
 				return writeError{werr}
 			}
+			recordCopyWriteBatch(batchBytes)
 		}
 
 		if err != nil {
@@ -109,14 +112,17 @@ func copyInternal(reader Reader, writer Writer, handler *copyHandler) error {
 
 // Copy dumps all payload from reader to writer or stops when an error occurs. It returns nil when EOF.
 func Copy(reader Reader, writer Writer, options ...CopyOption) error {
+	recordCopyStarted()
 	var handler copyHandler
 	for _, option := range options {
 		option(&handler)
 	}
 	err := copyInternal(reader, writer, &handler)
 	if err != nil && errors.Cause(err) != io.EOF {
+		recordCopyCompleted(err)
 		return err
 	}
+	recordCopyCompleted(nil)
 	return nil
 }
 

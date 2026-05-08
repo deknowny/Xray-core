@@ -17,6 +17,22 @@ type MetricsSnapshot struct {
 	BytespoolOwnedGetsTotal      int64
 	BytespoolOwnedReleasesTotal  int64
 	BytespoolOwnedRequestedTotal int64
+	CopyActive                   int64
+	CopyStartedTotal             int64
+	CopyCompletedTotal           int64
+	CopyReadErrorTotal           int64
+	CopyWriteErrorTotal          int64
+	CopyReadBatchesTotal         int64
+	CopyWriteBatchesTotal        int64
+	CopyReadBytesTotal           int64
+	CopyWriteBytesTotal          int64
+	CopyMaxBatchBytes            int64
+	CopyBatchBytesBuckets        []BucketMetric
+}
+
+type BucketMetric struct {
+	Le    string
+	Value int64
 }
 
 var (
@@ -35,7 +51,33 @@ var (
 	metricBytespoolOwnedGetsTotal      atomic.Int64
 	metricBytespoolOwnedReleasesTotal  atomic.Int64
 	metricBytespoolOwnedRequestedTotal atomic.Int64
+
+	metricCopyActive            atomic.Int64
+	metricCopyStartedTotal      atomic.Int64
+	metricCopyCompletedTotal    atomic.Int64
+	metricCopyReadErrorTotal    atomic.Int64
+	metricCopyWriteErrorTotal   atomic.Int64
+	metricCopyReadBatchesTotal  atomic.Int64
+	metricCopyWriteBatchesTotal atomic.Int64
+	metricCopyReadBytesTotal    atomic.Int64
+	metricCopyWriteBytesTotal   atomic.Int64
+	metricCopyMaxBatchBytes     atomic.Int64
 )
+
+var copyBatchBytesBuckets = []int64{
+	0,
+	1024,
+	4 * 1024,
+	8 * 1024,
+	16 * 1024,
+	32 * 1024,
+	64 * 1024,
+	128 * 1024,
+	256 * 1024,
+	512 * 1024,
+}
+
+var metricCopyBatchBytesBuckets [10]atomic.Int64
 
 func recordManagedBufferGet(capacity int, fallbackAlloc bool) {
 	metricManagedInUse.Add(1)
@@ -72,6 +114,40 @@ func recordBytespoolOwnedBufferRelease(capacity int) {
 	metricBytespoolOwnedReleasesTotal.Add(1)
 }
 
+func recordCopyStarted() {
+	metricCopyActive.Add(1)
+	metricCopyStartedTotal.Add(1)
+}
+
+func recordCopyCompleted(err error) {
+	metricCopyActive.Add(-1)
+	metricCopyCompletedTotal.Add(1)
+	if err == nil {
+		return
+	}
+	if IsWriteError(err) {
+		metricCopyWriteErrorTotal.Add(1)
+	} else {
+		metricCopyReadErrorTotal.Add(1)
+	}
+}
+
+func recordCopyReadBatch(bytes int64) {
+	metricCopyReadBatchesTotal.Add(1)
+	metricCopyReadBytesTotal.Add(bytes)
+	updateMetricMax(&metricCopyMaxBatchBytes, bytes)
+	for idx, bucket := range copyBatchBytesBuckets {
+		if bytes <= bucket {
+			metricCopyBatchBytesBuckets[idx].Add(1)
+		}
+	}
+}
+
+func recordCopyWriteBatch(bytes int64) {
+	metricCopyWriteBatchesTotal.Add(1)
+	metricCopyWriteBytesTotal.Add(bytes)
+}
+
 func Metrics() MetricsSnapshot {
 	return MetricsSnapshot{
 		ManagedInUse:                 metricManagedInUse.Load(),
@@ -88,7 +164,33 @@ func Metrics() MetricsSnapshot {
 		BytespoolOwnedGetsTotal:      metricBytespoolOwnedGetsTotal.Load(),
 		BytespoolOwnedReleasesTotal:  metricBytespoolOwnedReleasesTotal.Load(),
 		BytespoolOwnedRequestedTotal: metricBytespoolOwnedRequestedTotal.Load(),
+		CopyActive:                   metricCopyActive.Load(),
+		CopyStartedTotal:             metricCopyStartedTotal.Load(),
+		CopyCompletedTotal:           metricCopyCompletedTotal.Load(),
+		CopyReadErrorTotal:           metricCopyReadErrorTotal.Load(),
+		CopyWriteErrorTotal:          metricCopyWriteErrorTotal.Load(),
+		CopyReadBatchesTotal:         metricCopyReadBatchesTotal.Load(),
+		CopyWriteBatchesTotal:        metricCopyWriteBatchesTotal.Load(),
+		CopyReadBytesTotal:           metricCopyReadBytesTotal.Load(),
+		CopyWriteBytesTotal:          metricCopyWriteBytesTotal.Load(),
+		CopyMaxBatchBytes:            metricCopyMaxBatchBytes.Load(),
+		CopyBatchBytesBuckets:        snapshotCopyBatchBytesBuckets(),
 	}
+}
+
+func snapshotCopyBatchBytesBuckets() []BucketMetric {
+	values := make([]BucketMetric, 0, len(copyBatchBytesBuckets)+1)
+	for idx, bucket := range copyBatchBytesBuckets {
+		values = append(values, BucketMetric{
+			Le:    formatInt(bucket),
+			Value: metricCopyBatchBytesBuckets[idx].Load(),
+		})
+	}
+	values = append(values, BucketMetric{
+		Le:    "+Inf",
+		Value: metricCopyReadBatchesTotal.Load(),
+	})
+	return values
 }
 
 func updateMetricMax(target *atomic.Int64, value int64) {
@@ -101,4 +203,19 @@ func updateMetricMax(target *atomic.Int64, value int64) {
 			return
 		}
 	}
+}
+
+func formatInt(value int64) string {
+	if value == 0 {
+		return "0"
+	}
+
+	var buf [20]byte
+	i := len(buf)
+	for value > 0 {
+		i--
+		buf[i] = byte('0' + value%10)
+		value /= 10
+	}
+	return string(buf[i:])
 }
