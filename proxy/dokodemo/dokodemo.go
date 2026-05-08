@@ -1,10 +1,14 @@
 package dokodemo
 
 import (
+	"bytes"
 	"context"
+	"os"
 	"strconv"
 	"strings"
+	"time"
 
+	"github.com/pires/go-proxyproto"
 	"github.com/xtls/xray-core/common"
 	"github.com/xtls/xray-core/common/buf"
 	"github.com/xtls/xray-core/common/errors"
@@ -145,6 +149,7 @@ func (d *DokodemoDoor) Process(ctx context.Context, network net.Network, conn st
 	var reader buf.Reader
 	if dest.Network == net.Network_TCP {
 		reader = buf.NewReader(conn)
+		reader = maybePrependProxyProtocol(ctx, reader, conn)
 	} else {
 		reader = buf.NewPacketReader(conn)
 	}
@@ -189,6 +194,86 @@ func (d *DokodemoDoor) Process(ctx context.Context, network net.Network, conn st
 		return errors.New("failed to dispatch request").Base(err)
 	}
 	return nil // Unlike Dispatch(), DispatchLink() will not return until the outbound finishes Process()
+}
+
+type proxyProtocolReader struct {
+	header []byte
+	reader buf.Reader
+}
+
+func (r *proxyProtocolReader) ReadMultiBuffer() (buf.MultiBuffer, error) {
+	if len(r.header) > 0 {
+		header := r.header
+		r.header = nil
+		return buf.MultiBuffer{buf.FromBytes(header)}, nil
+	}
+
+	return r.reader.ReadMultiBuffer()
+}
+
+func (r *proxyProtocolReader) ReadMultiBufferTimeout(duration time.Duration) (buf.MultiBuffer, error) {
+	if len(r.header) > 0 {
+		return r.ReadMultiBuffer()
+	}
+
+	if timeoutReader, ok := r.reader.(buf.TimeoutReader); ok {
+		return timeoutReader.ReadMultiBufferTimeout(duration)
+	}
+
+	return r.reader.ReadMultiBuffer()
+}
+
+func maybePrependProxyProtocol(ctx context.Context, reader buf.Reader, conn stat.Connection) buf.Reader {
+	version := prependProxyProtocolVersion(ctx)
+	if version == 0 {
+		return reader
+	}
+
+	header := proxyproto.HeaderProxyFromAddrs(version, conn.RemoteAddr(), conn.LocalAddr())
+	var payload bytes.Buffer
+	if _, err := header.WriteTo(&payload); err != nil {
+		errors.LogInfoInner(ctx, err, "failed to build prepend PROXY protocol header")
+		return reader
+	}
+	if payload.Len() == 0 {
+		return reader
+	}
+
+	return &proxyProtocolReader{
+		header: payload.Bytes(),
+		reader: reader,
+	}
+}
+
+func prependProxyProtocolVersion(ctx context.Context) byte {
+	raw := strings.TrimSpace(os.Getenv("XRAY_PREPEND_PROXY_PROTOCOL"))
+	if raw == "" {
+		raw = strings.TrimSpace(os.Getenv("MTCNF_XRAY_PREPEND_PROXY_PROTOCOL"))
+	}
+	if raw == "" || raw == "0" {
+		return 0
+	}
+
+	inbound := session.InboundFromContext(ctx)
+	if inbound == nil {
+		return 0
+	}
+
+	tag := strings.TrimSpace(os.Getenv("XRAY_PREPEND_PROXY_PROTOCOL_INBOUND_TAG"))
+	if tag == "" {
+		tag = "public-in"
+	}
+	if tag != "*" && inbound.Tag != tag {
+		return 0
+	}
+
+	version, err := strconv.ParseUint(raw, 10, 8)
+	if err != nil || version < 1 || version > 2 {
+		errors.LogWarning(ctx, "invalid XRAY_PREPEND_PROXY_PROTOCOL=", raw, "; expected 1 or 2")
+		return 0
+	}
+
+	return byte(version)
 }
 
 func NewPacketWriter(conn net.PacketConn, d *net.Destination, mark int, back *net.UDPAddr) buf.Writer {
