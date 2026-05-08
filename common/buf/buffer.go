@@ -40,11 +40,14 @@ type Buffer struct {
 // New creates a Buffer with 0 length and 8K capacity, managed.
 func New() *Buffer {
 	buf := pool.Get().([]byte)
+	fallbackAlloc := false
 	if cap(buf) >= Size {
 		buf = buf[:Size]
 	} else {
 		buf = make([]byte, Size)
+		fallbackAlloc = true
 	}
+	recordManagedBufferGet(cap(buf), fallbackAlloc)
 
 	return &Buffer{
 		v: buf,
@@ -81,11 +84,14 @@ func FromBytes(b []byte) *Buffer {
 // This method is for buffers that is released in the same function.
 func StackNew() Buffer {
 	buf := pool.Get().([]byte)
+	fallbackAlloc := false
 	if cap(buf) >= Size {
 		buf = buf[:Size]
 	} else {
 		buf = make([]byte, Size)
+		fallbackAlloc = true
 	}
+	recordManagedBufferGet(cap(buf), fallbackAlloc)
 
 	return Buffer{
 		v: buf,
@@ -94,8 +100,10 @@ func StackNew() Buffer {
 
 // NewWithSize creates a Buffer with 0 length and capacity with at least the given size, bytespool's.
 func NewWithSize(size int32) *Buffer {
+	v := bytespool.Alloc(size)
+	recordBytespoolOwnedBufferGet(size, cap(v))
 	return &Buffer{
-		v:         bytespool.Alloc(size),
+		v:         v,
 		ownership: bytespools,
 	}
 }
@@ -112,10 +120,14 @@ func (b *Buffer) Release() {
 
 	switch b.ownership {
 	case managed:
+		recordManagedBufferRelease(cap(p))
 		if cap(p) == Size {
 			pool.Put(p)
+		} else {
+			recordManagedBufferDropped(cap(p))
 		}
 	case bytespools:
+		recordBytespoolOwnedBufferRelease(cap(p))
 		bytespool.Free(p)
 	}
 	b.UDP = nil

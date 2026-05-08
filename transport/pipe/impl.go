@@ -31,13 +31,17 @@ func (o *pipeOption) isFull(curSize int32) bool {
 
 type pipe struct {
 	sync.Mutex
-	data        buf.MultiBuffer
-	readSignal  *signal.Notifier
-	writeSignal *signal.Notifier
-	done        *done.Instance
-	errChan     chan error
-	option      pipeOption
-	state       state
+	data          buf.MultiBuffer
+	readSignal    *signal.Notifier
+	writeSignal   *signal.Notifier
+	done          *done.Instance
+	errChan       chan error
+	option        pipeOption
+	state         state
+	queuedBytes   int32
+	queuedBuffers int32
+	metricsLimit  int32
+	metricsActive bool
 }
 
 var (
@@ -85,6 +89,16 @@ func (p *pipe) readMultiBufferInternal() (buf.MultiBuffer, error) {
 
 	data := p.data
 	p.data = nil
+	if p.queuedBytes != 0 || p.queuedBuffers != 0 {
+		bytes := p.queuedBytes
+		buffers := p.queuedBuffers
+		p.queuedBytes = 0
+		p.queuedBuffers = 0
+		recordPipeQueuedDelta(-int64(bytes), -int64(buffers))
+		if bytes > 0 {
+			recordPipeRead(int64(bytes))
+		}
+	}
 	return data, nil
 }
 
@@ -130,14 +144,21 @@ func (p *pipe) writeMultiBufferInternal(mb buf.MultiBuffer) error {
 	defer p.Unlock()
 
 	if err := p.getState(false); err != nil {
+		recordPipeWriteError(err)
 		return err
 	}
 
+	mbBytes := mb.Len()
+	mbBuffers := int32(len(mb))
 	if p.data == nil {
 		p.data = mb
 	} else {
 		p.data, _ = buf.MergeMulti(p.data, mb)
 	}
+	p.queuedBytes += mbBytes
+	p.queuedBuffers += mbBuffers
+	recordPipeQueuedDelta(int64(mbBytes), int64(mbBuffers))
+	recordPipeWrite(int64(mbBytes), int64(p.queuedBytes))
 	return nil
 }
 
@@ -155,6 +176,7 @@ func (p *pipe) WriteMultiBuffer(mb buf.MultiBuffer) error {
 
 		if err == errBufferFull {
 			if p.option.discardOverflow {
+				recordPipeDiscardOverflow()
 				buf.ReleaseMulti(mb)
 				return nil
 			}
@@ -181,6 +203,7 @@ func (p *pipe) Close() error {
 		return nil
 	}
 
+	p.closeMetricsLocked()
 	p.state = closed
 	common.Must(p.done.Close())
 	return nil
@@ -192,6 +215,7 @@ func (p *pipe) Interrupt() {
 	defer p.Unlock()
 
 	if !p.data.IsEmpty() {
+		p.clearQueuedMetricsLocked()
 		buf.ReleaseMulti(p.data)
 		p.data = nil
 		if p.state == closed {
@@ -203,7 +227,25 @@ func (p *pipe) Interrupt() {
 		return
 	}
 
+	p.closeMetricsLocked()
 	p.state = errord
 
 	common.Must(p.done.Close())
+}
+
+func (p *pipe) closeMetricsLocked() {
+	if !p.metricsActive {
+		return
+	}
+	p.metricsActive = false
+	recordPipeClosed(p.metricsLimit)
+}
+
+func (p *pipe) clearQueuedMetricsLocked() {
+	if p.queuedBytes == 0 && p.queuedBuffers == 0 {
+		return
+	}
+	recordPipeQueuedDelta(-int64(p.queuedBytes), -int64(p.queuedBuffers))
+	p.queuedBytes = 0
+	p.queuedBuffers = 0
 }

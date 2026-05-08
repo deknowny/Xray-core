@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"runtime"
+	"runtime/debug"
 	"sort"
 	"strconv"
 	"strings"
@@ -16,9 +18,12 @@ import (
 
 	"github.com/xtls/xray-core/app/observatory"
 	appstats "github.com/xtls/xray-core/app/stats"
+	"github.com/xtls/xray-core/common/buf"
+	"github.com/xtls/xray-core/common/bytespool"
 	xerrors "github.com/xtls/xray-core/common/errors"
 	"github.com/xtls/xray-core/features/extension"
 	feature_stats "github.com/xtls/xray-core/features/stats"
+	"github.com/xtls/xray-core/transport/pipe"
 )
 
 const prometheusBuildBaseTag = "v26.3.27"
@@ -156,6 +161,10 @@ func prometheusHandler(w http.ResponseWriter, _ *http.Request) {
 
 	writeBuildInfo(w)
 	writeRuntimeMetrics(w)
+	writeProcessMemoryMetrics(w)
+	writeBufferMetrics(w)
+	writeBytespoolMetrics(w)
+	writePipeMetrics(w)
 
 	if value := activePrometheusHandler.Load(); value != nil {
 		if handler, ok := value.(*MetricsHandler); ok {
@@ -203,9 +212,69 @@ func writeRuntimeMetrics(w io.Writer) {
 	fmt.Fprintln(w, "# TYPE xray_runtime_heap_alloc_bytes gauge")
 	fmt.Fprintf(w, "xray_runtime_heap_alloc_bytes %d\n", mem.HeapAlloc)
 
+	fmt.Fprintln(w, "# HELP xray_runtime_heap_sys_bytes Go heap bytes obtained from the OS.")
+	fmt.Fprintln(w, "# TYPE xray_runtime_heap_sys_bytes gauge")
+	fmt.Fprintf(w, "xray_runtime_heap_sys_bytes %d\n", mem.HeapSys)
+
+	fmt.Fprintln(w, "# HELP xray_runtime_heap_idle_bytes Go heap bytes in idle spans.")
+	fmt.Fprintln(w, "# TYPE xray_runtime_heap_idle_bytes gauge")
+	fmt.Fprintf(w, "xray_runtime_heap_idle_bytes %d\n", mem.HeapIdle)
+
+	fmt.Fprintln(w, "# HELP xray_runtime_heap_inuse_bytes Go heap bytes in active spans.")
+	fmt.Fprintln(w, "# TYPE xray_runtime_heap_inuse_bytes gauge")
+	fmt.Fprintf(w, "xray_runtime_heap_inuse_bytes %d\n", mem.HeapInuse)
+
+	fmt.Fprintln(w, "# HELP xray_runtime_heap_released_bytes Go heap bytes released to the OS.")
+	fmt.Fprintln(w, "# TYPE xray_runtime_heap_released_bytes gauge")
+	fmt.Fprintf(w, "xray_runtime_heap_released_bytes %d\n", mem.HeapReleased)
+
 	fmt.Fprintln(w, "# HELP xray_runtime_heap_objects Go heap object count.")
 	fmt.Fprintln(w, "# TYPE xray_runtime_heap_objects gauge")
 	fmt.Fprintf(w, "xray_runtime_heap_objects %d\n", mem.HeapObjects)
+
+	fmt.Fprintln(w, "# HELP xray_runtime_alloc_bytes_total Total bytes allocated by Go.")
+	fmt.Fprintln(w, "# TYPE xray_runtime_alloc_bytes_total counter")
+	fmt.Fprintf(w, "xray_runtime_alloc_bytes_total %d\n", mem.TotalAlloc)
+
+	fmt.Fprintln(w, "# HELP xray_runtime_mallocs_total Total Go heap allocation count.")
+	fmt.Fprintln(w, "# TYPE xray_runtime_mallocs_total counter")
+	fmt.Fprintf(w, "xray_runtime_mallocs_total %d\n", mem.Mallocs)
+
+	fmt.Fprintln(w, "# HELP xray_runtime_frees_total Total Go heap free count.")
+	fmt.Fprintln(w, "# TYPE xray_runtime_frees_total counter")
+	fmt.Fprintf(w, "xray_runtime_frees_total %d\n", mem.Frees)
+
+	fmt.Fprintln(w, "# HELP xray_runtime_sys_bytes Go bytes obtained from the OS.")
+	fmt.Fprintln(w, "# TYPE xray_runtime_sys_bytes gauge")
+	fmt.Fprintf(w, "xray_runtime_sys_bytes %d\n", mem.Sys)
+
+	fmt.Fprintln(w, "# HELP xray_runtime_stack_inuse_bytes Go stack bytes in use.")
+	fmt.Fprintln(w, "# TYPE xray_runtime_stack_inuse_bytes gauge")
+	fmt.Fprintf(w, "xray_runtime_stack_inuse_bytes %d\n", mem.StackInuse)
+
+	fmt.Fprintln(w, "# HELP xray_runtime_stack_sys_bytes Go stack bytes obtained from the OS.")
+	fmt.Fprintln(w, "# TYPE xray_runtime_stack_sys_bytes gauge")
+	fmt.Fprintf(w, "xray_runtime_stack_sys_bytes %d\n", mem.StackSys)
+
+	fmt.Fprintln(w, "# HELP xray_runtime_mspan_inuse_bytes Go mspan bytes in use.")
+	fmt.Fprintln(w, "# TYPE xray_runtime_mspan_inuse_bytes gauge")
+	fmt.Fprintf(w, "xray_runtime_mspan_inuse_bytes %d\n", mem.MSpanInuse)
+
+	fmt.Fprintln(w, "# HELP xray_runtime_mcache_inuse_bytes Go mcache bytes in use.")
+	fmt.Fprintln(w, "# TYPE xray_runtime_mcache_inuse_bytes gauge")
+	fmt.Fprintf(w, "xray_runtime_mcache_inuse_bytes %d\n", mem.MCacheInuse)
+
+	fmt.Fprintln(w, "# HELP xray_runtime_next_gc_bytes Go heap target for the next GC.")
+	fmt.Fprintln(w, "# TYPE xray_runtime_next_gc_bytes gauge")
+	fmt.Fprintf(w, "xray_runtime_next_gc_bytes %d\n", mem.NextGC)
+
+	fmt.Fprintln(w, "# HELP xray_runtime_memory_limit_bytes Go runtime memory limit.")
+	fmt.Fprintln(w, "# TYPE xray_runtime_memory_limit_bytes gauge")
+	fmt.Fprintf(w, "xray_runtime_memory_limit_bytes %d\n", debug.SetMemoryLimit(-1))
+
+	fmt.Fprintln(w, "# HELP xray_runtime_gc_cpu_fraction Recent fraction of CPU used by Go GC.")
+	fmt.Fprintln(w, "# TYPE xray_runtime_gc_cpu_fraction gauge")
+	fmt.Fprintf(w, "xray_runtime_gc_cpu_fraction %.9f\n", mem.GCCPUFraction)
 
 	fmt.Fprintln(w, "# HELP xray_runtime_gc_total Go GC cycles.")
 	fmt.Fprintln(w, "# TYPE xray_runtime_gc_total counter")
@@ -214,6 +283,196 @@ func writeRuntimeMetrics(w io.Writer) {
 	fmt.Fprintln(w, "# HELP xray_runtime_gc_pause_seconds_total Total Go GC pause time.")
 	fmt.Fprintln(w, "# TYPE xray_runtime_gc_pause_seconds_total counter")
 	fmt.Fprintf(w, "xray_runtime_gc_pause_seconds_total %.6f\n", float64(mem.PauseTotalNs)/float64(time.Second))
+
+	fmt.Fprintln(w, "# HELP xray_runtime_gc_last_pause_seconds Last Go GC pause duration.")
+	fmt.Fprintln(w, "# TYPE xray_runtime_gc_last_pause_seconds gauge")
+	lastPause := uint64(0)
+	if mem.NumGC > 0 {
+		lastPause = mem.PauseNs[(mem.NumGC+255)%256]
+	}
+	fmt.Fprintf(w, "xray_runtime_gc_last_pause_seconds %.9f\n", float64(lastPause)/float64(time.Second))
+}
+
+func writeProcessMemoryMetrics(w io.Writer) {
+	if statm, ok := readProcSelfStatm(); ok {
+		fmt.Fprintln(w, "# HELP xray_process_virtual_memory_bytes Process virtual memory from /proc/self/statm.")
+		fmt.Fprintln(w, "# TYPE xray_process_virtual_memory_bytes gauge")
+		fmt.Fprintf(w, "xray_process_virtual_memory_bytes %d\n", statm.sizeBytes)
+
+		fmt.Fprintln(w, "# HELP xray_process_resident_memory_bytes Process resident memory from /proc/self/statm.")
+		fmt.Fprintln(w, "# TYPE xray_process_resident_memory_bytes gauge")
+		fmt.Fprintf(w, "xray_process_resident_memory_bytes %d\n", statm.residentBytes)
+
+		fmt.Fprintln(w, "# HELP xray_process_shared_memory_bytes Process shared resident memory from /proc/self/statm.")
+		fmt.Fprintln(w, "# TYPE xray_process_shared_memory_bytes gauge")
+		fmt.Fprintf(w, "xray_process_shared_memory_bytes %d\n", statm.sharedBytes)
+
+		fmt.Fprintln(w, "# HELP xray_process_data_memory_bytes Process data and stack memory from /proc/self/statm.")
+		fmt.Fprintln(w, "# TYPE xray_process_data_memory_bytes gauge")
+		fmt.Fprintf(w, "xray_process_data_memory_bytes %d\n", statm.dataBytes)
+	}
+
+	if value, ok := readUintFile("/sys/fs/cgroup/memory.current"); ok {
+		fmt.Fprintln(w, "# HELP xray_cgroup_memory_current_bytes Current cgroup memory usage.")
+		fmt.Fprintln(w, "# TYPE xray_cgroup_memory_current_bytes gauge")
+		fmt.Fprintf(w, "xray_cgroup_memory_current_bytes %d\n", value)
+	}
+	if value, ok := readUintFile("/sys/fs/cgroup/memory.max"); ok {
+		fmt.Fprintln(w, "# HELP xray_cgroup_memory_limit_bytes Cgroup memory limit, -1 means unlimited.")
+		fmt.Fprintln(w, "# TYPE xray_cgroup_memory_limit_bytes gauge")
+		fmt.Fprintf(w, "xray_cgroup_memory_limit_bytes %d\n", value)
+	}
+}
+
+func writeBufferMetrics(w io.Writer) {
+	snapshot := buf.Metrics()
+
+	fmt.Fprintln(w, "# HELP xray_buf_managed_buffers_in_use Managed 8KiB buf.Buffer objects currently checked out.")
+	fmt.Fprintln(w, "# TYPE xray_buf_managed_buffers_in_use gauge")
+	fmt.Fprintf(w, "xray_buf_managed_buffers_in_use %d\n", snapshot.ManagedInUse)
+
+	fmt.Fprintln(w, "# HELP xray_buf_managed_bytes_in_use Managed buf.Buffer capacity currently checked out.")
+	fmt.Fprintln(w, "# TYPE xray_buf_managed_bytes_in_use gauge")
+	fmt.Fprintf(w, "xray_buf_managed_bytes_in_use %d\n", snapshot.ManagedBytesInUse)
+
+	fmt.Fprintln(w, "# HELP xray_buf_managed_max_bytes_in_use High-water mark for managed buf.Buffer capacity.")
+	fmt.Fprintln(w, "# TYPE xray_buf_managed_max_bytes_in_use gauge")
+	fmt.Fprintf(w, "xray_buf_managed_max_bytes_in_use %d\n", snapshot.ManagedMaxBytesInUse)
+
+	fmt.Fprintln(w, "# HELP xray_buf_managed_gets_total Managed buf.Buffer checkout count.")
+	fmt.Fprintln(w, "# TYPE xray_buf_managed_gets_total counter")
+	fmt.Fprintf(w, "xray_buf_managed_gets_total %d\n", snapshot.ManagedGetsTotal)
+
+	fmt.Fprintln(w, "# HELP xray_buf_managed_releases_total Managed buf.Buffer release count.")
+	fmt.Fprintln(w, "# TYPE xray_buf_managed_releases_total counter")
+	fmt.Fprintf(w, "xray_buf_managed_releases_total %d\n", snapshot.ManagedReleasesTotal)
+
+	fmt.Fprintln(w, "# HELP xray_buf_managed_fallback_allocs_total Managed buf.Buffer fallback allocation count.")
+	fmt.Fprintln(w, "# TYPE xray_buf_managed_fallback_allocs_total counter")
+	fmt.Fprintf(w, "xray_buf_managed_fallback_allocs_total %d\n", snapshot.ManagedFallbackAllocsTotal)
+
+	fmt.Fprintln(w, "# HELP xray_buf_managed_dropped_total Managed buf.Buffer releases not returned to the 8KiB pool because capacity drifted.")
+	fmt.Fprintln(w, "# TYPE xray_buf_managed_dropped_total counter")
+	fmt.Fprintf(w, "xray_buf_managed_dropped_total %d\n", snapshot.ManagedDroppedTotal)
+
+	fmt.Fprintln(w, "# HELP xray_buf_managed_dropped_bytes_total Managed buf.Buffer capacity dropped instead of returned to the 8KiB pool.")
+	fmt.Fprintln(w, "# TYPE xray_buf_managed_dropped_bytes_total counter")
+	fmt.Fprintf(w, "xray_buf_managed_dropped_bytes_total %d\n", snapshot.ManagedDroppedBytesTotal)
+
+	fmt.Fprintln(w, "# HELP xray_buf_bytespool_owned_buffers_in_use buf.Buffer objects backed by bytespool currently checked out.")
+	fmt.Fprintln(w, "# TYPE xray_buf_bytespool_owned_buffers_in_use gauge")
+	fmt.Fprintf(w, "xray_buf_bytespool_owned_buffers_in_use %d\n", snapshot.BytespoolOwnedInUse)
+
+	fmt.Fprintln(w, "# HELP xray_buf_bytespool_owned_bytes_in_use bytespool-backed buf.Buffer capacity currently checked out.")
+	fmt.Fprintln(w, "# TYPE xray_buf_bytespool_owned_bytes_in_use gauge")
+	fmt.Fprintf(w, "xray_buf_bytespool_owned_bytes_in_use %d\n", snapshot.BytespoolOwnedBytesInUse)
+
+	fmt.Fprintln(w, "# HELP xray_buf_bytespool_owned_max_bytes_in_use High-water mark for bytespool-backed buf.Buffer capacity.")
+	fmt.Fprintln(w, "# TYPE xray_buf_bytespool_owned_max_bytes_in_use gauge")
+	fmt.Fprintf(w, "xray_buf_bytespool_owned_max_bytes_in_use %d\n", snapshot.BytespoolOwnedMaxBytesInUse)
+}
+
+func writeBytespoolMetrics(w io.Writer) {
+	snapshot := bytespool.Metrics()
+
+	fmt.Fprintln(w, "# HELP xray_bytespool_buffers_in_use bytespool slices currently checked out by bucket.")
+	fmt.Fprintln(w, "# TYPE xray_bytespool_buffers_in_use gauge")
+	fmt.Fprintln(w, "# HELP xray_bytespool_bytes_in_use bytespool slice capacity currently checked out by bucket.")
+	fmt.Fprintln(w, "# TYPE xray_bytespool_bytes_in_use gauge")
+	fmt.Fprintln(w, "# HELP xray_bytespool_max_bytes_in_use bytespool slice capacity high-water mark by bucket.")
+	fmt.Fprintln(w, "# TYPE xray_bytespool_max_bytes_in_use gauge")
+	fmt.Fprintln(w, "# HELP xray_bytespool_allocs_total bytespool checkout count by bucket.")
+	fmt.Fprintln(w, "# TYPE xray_bytespool_allocs_total counter")
+	fmt.Fprintln(w, "# HELP xray_bytespool_frees_total bytespool release count by bucket.")
+	fmt.Fprintln(w, "# TYPE xray_bytespool_frees_total counter")
+	for _, pool := range snapshot.Pools {
+		bucket := quoteLabel(strconv.FormatInt(int64(pool.BucketBytes), 10))
+		fmt.Fprintf(w, "xray_bytespool_buffers_in_use{bucket_bytes=%s} %d\n", bucket, pool.InUse)
+		fmt.Fprintf(w, "xray_bytespool_bytes_in_use{bucket_bytes=%s} %d\n", bucket, pool.InUseBytes)
+		fmt.Fprintf(w, "xray_bytespool_max_bytes_in_use{bucket_bytes=%s} %d\n", bucket, pool.MaxInUseBytes)
+		fmt.Fprintf(w, "xray_bytespool_allocs_total{bucket_bytes=%s} %d\n", bucket, pool.AllocTotal)
+		fmt.Fprintf(w, "xray_bytespool_frees_total{bucket_bytes=%s} %d\n", bucket, pool.FreeTotal)
+	}
+
+	fmt.Fprintln(w, "# HELP xray_bytespool_large_buffers_in_use bytespool large slices currently checked out.")
+	fmt.Fprintln(w, "# TYPE xray_bytespool_large_buffers_in_use gauge")
+	fmt.Fprintf(w, "xray_bytespool_large_buffers_in_use %d\n", snapshot.LargeInUse)
+
+	fmt.Fprintln(w, "# HELP xray_bytespool_large_bytes_in_use bytespool large slice capacity currently checked out.")
+	fmt.Fprintln(w, "# TYPE xray_bytespool_large_bytes_in_use gauge")
+	fmt.Fprintf(w, "xray_bytespool_large_bytes_in_use %d\n", snapshot.LargeInUseBytes)
+
+	fmt.Fprintln(w, "# HELP xray_bytespool_large_allocs_total bytespool large slice checkout count.")
+	fmt.Fprintln(w, "# TYPE xray_bytespool_large_allocs_total counter")
+	fmt.Fprintf(w, "xray_bytespool_large_allocs_total %d\n", snapshot.LargeAllocTotal)
+
+	fmt.Fprintln(w, "# HELP xray_bytespool_large_frees_total bytespool large slice release count.")
+	fmt.Fprintln(w, "# TYPE xray_bytespool_large_frees_total counter")
+	fmt.Fprintf(w, "xray_bytespool_large_frees_total %d\n", snapshot.LargeFreeTotal)
+}
+
+func writePipeMetrics(w io.Writer) {
+	snapshot := pipe.Metrics()
+
+	fmt.Fprintln(w, "# HELP xray_pipe_active Active internal pipe queues.")
+	fmt.Fprintln(w, "# TYPE xray_pipe_active gauge")
+	fmt.Fprintf(w, "xray_pipe_active %d\n", snapshot.Active)
+
+	fmt.Fprintln(w, "# HELP xray_pipe_created_total Internal pipe queues created.")
+	fmt.Fprintln(w, "# TYPE xray_pipe_created_total counter")
+	fmt.Fprintf(w, "xray_pipe_created_total %d\n", snapshot.CreatedTotal)
+
+	fmt.Fprintln(w, "# HELP xray_pipe_buffered_bytes Bytes currently queued in internal pipes.")
+	fmt.Fprintln(w, "# TYPE xray_pipe_buffered_bytes gauge")
+	fmt.Fprintf(w, "xray_pipe_buffered_bytes %d\n", snapshot.BufferedBytes)
+
+	fmt.Fprintln(w, "# HELP xray_pipe_buffered_buffers buf.Buffer chunks currently queued in internal pipes.")
+	fmt.Fprintln(w, "# TYPE xray_pipe_buffered_buffers gauge")
+	fmt.Fprintf(w, "xray_pipe_buffered_buffers %d\n", snapshot.BufferedBuffers)
+
+	fmt.Fprintln(w, "# HELP xray_pipe_max_buffered_bytes High-water mark for bytes queued across all internal pipes.")
+	fmt.Fprintln(w, "# TYPE xray_pipe_max_buffered_bytes gauge")
+	fmt.Fprintf(w, "xray_pipe_max_buffered_bytes %d\n", snapshot.MaxBufferedBytes)
+
+	fmt.Fprintln(w, "# HELP xray_pipe_max_pipe_buffered_bytes High-water mark for bytes queued in a single internal pipe.")
+	fmt.Fprintln(w, "# TYPE xray_pipe_max_pipe_buffered_bytes gauge")
+	fmt.Fprintf(w, "xray_pipe_max_pipe_buffered_bytes %d\n", snapshot.MaxPipeBufferedBytes)
+
+	fmt.Fprintln(w, "# HELP xray_pipe_writes_total Internal pipe write count.")
+	fmt.Fprintln(w, "# TYPE xray_pipe_writes_total counter")
+	fmt.Fprintf(w, "xray_pipe_writes_total %d\n", snapshot.WritesTotal)
+
+	fmt.Fprintln(w, "# HELP xray_pipe_write_bytes_total Bytes written into internal pipes.")
+	fmt.Fprintln(w, "# TYPE xray_pipe_write_bytes_total counter")
+	fmt.Fprintf(w, "xray_pipe_write_bytes_total %d\n", snapshot.WriteBytesTotal)
+
+	fmt.Fprintln(w, "# HELP xray_pipe_reads_total Internal pipe read count.")
+	fmt.Fprintln(w, "# TYPE xray_pipe_reads_total counter")
+	fmt.Fprintf(w, "xray_pipe_reads_total %d\n", snapshot.ReadsTotal)
+
+	fmt.Fprintln(w, "# HELP xray_pipe_read_bytes_total Bytes read from internal pipes.")
+	fmt.Fprintln(w, "# TYPE xray_pipe_read_bytes_total counter")
+	fmt.Fprintf(w, "xray_pipe_read_bytes_total %d\n", snapshot.ReadBytesTotal)
+
+	fmt.Fprintln(w, "# HELP xray_pipe_buffer_full_total Internal pipe writes that hit the configured queue limit.")
+	fmt.Fprintln(w, "# TYPE xray_pipe_buffer_full_total counter")
+	fmt.Fprintf(w, "xray_pipe_buffer_full_total %d\n", snapshot.BufferFullTotal)
+
+	fmt.Fprintln(w, "# HELP xray_pipe_discard_overflow_total Internal pipe writes discarded because discard-overflow mode was enabled.")
+	fmt.Fprintln(w, "# TYPE xray_pipe_discard_overflow_total counter")
+	fmt.Fprintf(w, "xray_pipe_discard_overflow_total %d\n", snapshot.DiscardOverflowTotal)
+
+	fmt.Fprintln(w, "# HELP xray_pipe_write_closed_total Internal pipe writes attempted after pipe close.")
+	fmt.Fprintln(w, "# TYPE xray_pipe_write_closed_total counter")
+	fmt.Fprintf(w, "xray_pipe_write_closed_total %d\n", snapshot.WriteClosedTotal)
+
+	fmt.Fprintln(w, "# HELP xray_pipe_write_error_total Internal pipe write errors not otherwise classified.")
+	fmt.Fprintln(w, "# TYPE xray_pipe_write_error_total counter")
+	fmt.Fprintf(w, "xray_pipe_write_error_total %d\n", snapshot.WriteErrorTotal)
+
+	writeMetricValues(w, "xray_pipe_created_by_limit_total", "Internal pipe queues created by configured byte limit.", "counter", []string{"limit_bytes"}, snapshot.CreatedByLimit)
+	writeMetricValues(w, "xray_pipe_active_by_limit", "Active internal pipe queues by configured byte limit.", "gauge", []string{"limit_bytes"}, snapshot.ActiveByLimit)
+	writeMetricValues(w, "xray_pipe_queue_bytes_observed_total", "Cumulative observed internal pipe queue size after writes.", "counter", []string{"le"}, snapshot.QueueBytesBuckets)
 }
 
 func writeStatsMetrics(w io.Writer, manager feature_stats.Manager) {
@@ -334,6 +593,84 @@ func writeVecSamples(w io.Writer, name string, labelNames []string, store *sync.
 			fmt.Fprintf(w, "%s%s %d\n", name, formatLabels(labelNames, labels), metricValue)
 		}
 	}
+}
+
+func writeMetricValues(w io.Writer, name string, help string, metricType string, labelNames []string, values []pipe.MetricValue) {
+	fmt.Fprintf(w, "# HELP %s %s\n", name, help)
+	fmt.Fprintf(w, "# TYPE %s %s\n", name, metricType)
+	for _, value := range values {
+		fmt.Fprintf(w, "%s%s %d\n", name, formatLabels(labelNames, value.Labels), value.Value)
+	}
+}
+
+type procSelfStatm struct {
+	sizeBytes     uint64
+	residentBytes uint64
+	sharedBytes   uint64
+	dataBytes     uint64
+}
+
+func readProcSelfStatm() (procSelfStatm, bool) {
+	raw, err := os.ReadFile("/proc/self/statm")
+	if err != nil {
+		return procSelfStatm{}, false
+	}
+	fields := strings.Fields(string(raw))
+	if len(fields) < 6 {
+		return procSelfStatm{}, false
+	}
+
+	sizePages, ok := parseUintField(fields[0])
+	if !ok {
+		return procSelfStatm{}, false
+	}
+	residentPages, ok := parseUintField(fields[1])
+	if !ok {
+		return procSelfStatm{}, false
+	}
+	sharedPages, ok := parseUintField(fields[2])
+	if !ok {
+		return procSelfStatm{}, false
+	}
+	dataPages, ok := parseUintField(fields[5])
+	if !ok {
+		return procSelfStatm{}, false
+	}
+
+	pageSize := uint64(os.Getpagesize())
+	return procSelfStatm{
+		sizeBytes:     sizePages * pageSize,
+		residentBytes: residentPages * pageSize,
+		sharedBytes:   sharedPages * pageSize,
+		dataBytes:     dataPages * pageSize,
+	}, true
+}
+
+func readUintFile(path string) (int64, bool) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return 0, false
+	}
+	value := strings.TrimSpace(string(raw))
+	if value == "max" {
+		return -1, true
+	}
+	parsed, ok := parseUintField(value)
+	if !ok {
+		return 0, false
+	}
+	if parsed > uint64(^uint(0)>>1) {
+		return 0, false
+	}
+	return int64(parsed), true
+}
+
+func parseUintField(value string) (uint64, bool) {
+	parsed, err := strconv.ParseUint(value, 10, 64)
+	if err != nil {
+		return 0, false
+	}
+	return parsed, true
 }
 
 func labelsKey(labels ...string) string {

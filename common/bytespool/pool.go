@@ -38,10 +38,8 @@ func init() {
 //
 // xray:api:stable
 func GetPool(size int32) *sync.Pool {
-	for idx, ps := range poolSize {
-		if size <= ps {
-			return &pool[idx]
-		}
+	if idx := poolIndex(size); idx >= 0 {
+		return &pool[idx]
 	}
 	return nil
 }
@@ -50,10 +48,18 @@ func GetPool(size int32) *sync.Pool {
 //
 // xray:api:stable
 func Alloc(size int32) []byte {
-	pool := GetPool(size)
-	if pool != nil {
-		return pool.Get().([]byte)
+	idx := poolIndex(size)
+	if idx >= 0 {
+		b := pool[idx].Get().([]byte)
+		capacity := int32(cap(b))
+		if capacity > poolSize[numPools-1] {
+			recordAlloc(-1, capacity)
+		} else {
+			recordAlloc(idx, capacity)
+		}
+		return b
 	}
+	recordAlloc(-1, size)
 	return make([]byte, size)
 }
 
@@ -63,10 +69,25 @@ func Alloc(size int32) []byte {
 func Free(b []byte) {
 	size := int32(cap(b))
 	b = b[0:cap(b)]
+	if size > poolSize[numPools-1] {
+		recordFree(-1, size)
+		pool[numPools-1].Put(b)
+		return
+	}
 	for i := numPools - 1; i >= 0; i-- {
 		if size >= poolSize[i] {
+			recordFree(i, size)
 			pool[i].Put(b)
 			return
 		}
 	}
+}
+
+func poolIndex(size int32) int {
+	for idx, ps := range poolSize {
+		if size <= ps {
+			return idx
+		}
+	}
+	return -1
 }

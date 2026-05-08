@@ -61,6 +61,9 @@ func New(opts ...Option) (*Reader, *Writer) {
 	for _, opt := range opts {
 		opt(&(p.option))
 	}
+	p.metricsLimit = p.option.limit
+	p.metricsActive = true
+	recordPipeCreated(p.metricsLimit)
 
 	return &Reader{
 			pipe: p,
